@@ -360,7 +360,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { Activity, Database, Factory, Play, RotateCcw } from "@lucide/vue";
 import {
   buildControlMessage,
@@ -446,9 +446,15 @@ const mode = ref<Mode>("demo");
 const controlMessage = ref<ControlMessage | null>(null);
 const settings = ref<Setting[]>([]);
 const schedules = ref<Schedule[]>([]);
+const sseConnection = ref<EventSource | null>(null);
+const sseConnected = ref(false);
 
 const connectionText = computed(() =>
-  mode.value === "api" ? "Spring API connected" : "Demo mode",
+  mode.value === "api"
+    ? sseConnected.value
+      ? "Spring API + SSE connected"
+      : "Spring API connected"
+    : "Demo mode",
 );
 
 async function loadSummary() {
@@ -476,10 +482,43 @@ async function loadMasterData() {
   }
 }
 
+function closeSseConnection() {
+  sseConnection.value?.close();
+  sseConnection.value = null;
+  sseConnected.value = false;
+}
+
+function connectMonitoringEvents() {
+  closeSseConnection();
+
+  const eventSource = new EventSource(
+    `http://localhost:8080/api/monitoring/${selectedSchIdx.value}/events`,
+  );
+
+  eventSource.onopen = () => {
+    sseConnected.value = true;
+    mode.value = "api";
+  };
+
+  eventSource.addEventListener("monitoring-summary", (event) => {
+    summary.value = JSON.parse(event.data) as MonitoringSummary;
+    mode.value = "api";
+    sseConnected.value = true;
+    console.log(summary.value, "event");
+  });
+
+  eventSource.onerror = () => {
+    sseConnected.value = false;
+  };
+
+  sseConnection.value = eventSource;
+}
+
 function selectTab(tab: ActiveTab) {
   activeTab.value = tab;
   if (tab === "monitoring") {
     loadSummary();
+    connectMonitoringEvents();
     return;
   }
   loadMasterData();
@@ -568,9 +607,17 @@ function onScheduleChange(event: Event) {
   const input = event.target as HTMLInputElement;
   selectedSchIdx.value = Number(input.value);
   loadSummary();
+  connectMonitoringEvents();
 }
 
-onMounted(loadSummary);
+onMounted(() => {
+  loadSummary();
+  connectMonitoringEvents();
+});
+
+onUnmounted(() => {
+  closeSseConnection();
+});
 </script>
 
 <style scoped>
