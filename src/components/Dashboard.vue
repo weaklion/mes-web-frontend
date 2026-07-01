@@ -81,11 +81,19 @@
             <RotateCcw :size="18" />
           </button>
           <button
-            class="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-blue-600 bg-blue-600 px-3 font-medium text-white transition hover:bg-blue-700"
+            class="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-blue-600 bg-blue-600 px-3 font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="isRunning"
             @click="startProcess"
           >
             <Play :size="18" />
             Start
+          </button>
+          <button
+            class="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-red-600 bg-red-600 px-3 font-medium text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="!isRunning"
+            @click="stopProcess"
+          >
+            Stop
           </button>
         </div>
       </header>
@@ -146,7 +154,10 @@
             class="mt-3.5 min-h-[116px] overflow-auto rounded-lg bg-slate-900 p-3.5 text-slate-200"
             >{{
               JSON.stringify(
-                controlMessage ?? { topic: "pknu/sf52/control", flag: "WAIT" },
+                controlMessage ?? {
+                  topic: `mes/${summary.plantCode}/${summary.facilityId}/inspection`,
+                  flag: "WAIT",
+                },
                 null,
                 2,
               )
@@ -396,6 +407,22 @@ interface InspectionPayload {
   timestamp: string;
 }
 
+interface SimulatorInspectionRequest {
+  scheduleId: number;
+  clientId: string;
+  result: InspectionResult;
+}
+
+interface PublishedInspectionMessage {
+  eventId: string;
+  scheduleId: number;
+  clientId: string;
+  plantCode: string;
+  facilityId: string;
+  result: InspectionResult;
+  inspectedAt: string;
+}
+
 interface ProductionEvent {
   id: string;
   control: ControlMessage;
@@ -448,6 +475,11 @@ const settings = ref<Setting[]>([]);
 const schedules = ref<Schedule[]>([]);
 const sseConnection = ref<EventSource | null>(null);
 const sseConnected = ref(false);
+const isRunning = ref(false);
+
+let inspectionTimerId: number | null = null;
+let resetTimerId: number | null = null;
+let nextCycleTimerId: number | null = null;
 
 const connectionText = computed(() =>
   mode.value === "api"
@@ -504,7 +536,6 @@ function connectMonitoringEvents() {
     summary.value = JSON.parse(event.data) as MonitoringSummary;
     mode.value = "api";
     sseConnected.value = true;
-    console.log(summary.value, "event");
   });
 
   eventSource.onerror = () => {
@@ -524,8 +555,28 @@ function selectTab(tab: ActiveTab) {
   loadMasterData();
 }
 
+function clearSimulatorTimers() {
+  if (inspectionTimerId !== null) {
+    window.clearTimeout(inspectionTimerId);
+    inspectionTimerId = null;
+  }
+
+  if (resetTimerId !== null) {
+    window.clearTimeout(resetTimerId);
+    resetTimerId = null;
+  }
+
+  if (nextCycleTimerId !== null) {
+    window.clearTimeout(nextCycleTimerId);
+    nextCycleTimerId = null;
+  }
+}
+
 async function startProcess() {
-  lineState.value = "moving";
+  if (isRunning.value) {
+    return;
+  }
+
   let message: ControlMessage;
 
   try {
@@ -544,38 +595,59 @@ async function startProcess() {
   }
 
   controlMessage.value = message;
-  window.setTimeout(
+  isRunning.value = true;
+  runInspectionCycle(message);
+}
+
+function runInspectionCycle(message: ControlMessage) {
+  if (!isRunning.value) {
+    return;
+  }
+
+  lineState.value = "moving";
+  inspectionTimerId = window.setTimeout(
     () => finishInspection(message),
     summary.value.loadTime * 1000,
   );
 }
 
 async function finishInspection(message: ControlMessage) {
+  inspectionTimerId = null;
+
+  if (!isRunning.value) {
+    return;
+  }
+
   const result = nextInspectionResult() as InspectionResult;
-  const inspection: InspectionPayload = {
-    schIdx: selectedSchIdx.value,
+  const request: SimulatorInspectionRequest = {
+    scheduleId: selectedSchIdx.value,
     clientId: "IOT01",
     result,
-    timestamp: formatDateTime(),
   };
+  let inspection: InspectionPayload;
 
   try {
-    summary.value = await postJson<MonitoringSummary, InspectionPayload>(
-      "/simulator/inspection-results",
-      inspection,
+    const publishedMessage = await postJson<
+      PublishedInspectionMessage,
+      SimulatorInspectionRequest
+    >(
+      "/simulator/inspection-results/mqtt",
+      request,
     );
+
+    inspection = {
+      schIdx: publishedMessage.scheduleId,
+      clientId: publishedMessage.clientId,
+      result: publishedMessage.result,
+      timestamp: publishedMessage.inspectedAt,
+    };
     mode.value = "api";
   } catch {
-    const successAmount =
-      summary.value.successAmount + (result === "OK" ? 1 : 0);
-    const failAmount = summary.value.failAmount + (result === "FAIL" ? 1 : 0);
-    const total = successAmount + failAmount;
-
-    summary.value = {
-      ...summary.value,
-      successAmount,
-      failAmount,
-      successRate: `${((successAmount * 100) / total).toFixed(1)} %`,
+    inspection = {
+      schIdx: selectedSchIdx.value,
+      clientId: request.clientId,
+      result,
+      timestamp: formatDateTime(),
     };
     mode.value = "demo";
   }
@@ -590,12 +662,29 @@ async function finishInspection(message: ControlMessage) {
   ].slice(0, 8);
 
   lineState.value = result === "OK" ? "ok" : "fail";
-  window.setTimeout(() => {
+  resetTimerId = window.setTimeout(() => {
+    resetTimerId = null;
     lineState.value = "idle";
+
+    if (!isRunning.value) {
+      return;
+    }
+
+    nextCycleTimerId = window.setTimeout(() => {
+      nextCycleTimerId = null;
+      runInspectionCycle(message);
+    }, 300);
   }, 900);
 }
 
+function stopProcess() {
+  isRunning.value = false;
+  clearSimulatorTimers();
+  lineState.value = "idle";
+}
+
 function resetDemo() {
+  stopProcess();
   summary.value = { ...demoSchedule };
   events.value = [];
   controlMessage.value = null;
@@ -604,6 +693,7 @@ function resetDemo() {
 }
 
 function onScheduleChange(event: Event) {
+  stopProcess();
   const input = event.target as HTMLInputElement;
   selectedSchIdx.value = Number(input.value);
   loadSummary();
@@ -616,6 +706,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  stopProcess();
   closeSseConnection();
 });
 </script>
