@@ -22,7 +22,7 @@ Vue Dashboard
 프론트는 다음 역할만 담당합니다.
 
 - 모니터링 요약 표시
-- Line Simulator 애니메이션 표시
+- Line Simulator 애니메이션 표시 (공장이라고 가정한 가상 simulator)
 - Start / Stop으로 반복 검사 트리거
 - SSE 수신 후 OK/FAIL 수량과 성공률 갱신
 - 기준정보와 생산계획 조회
